@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -50,6 +51,8 @@ func main() {
 			Body string `json:"body"`
 		}
 
+		badWords := [3]string{"kerfuffle", "sharbert", "fornax"}
+
 		decoder := json.NewDecoder(r.Body)
 		var params parameters
 		if err := decoder.Decode(&params); err != nil {
@@ -78,11 +81,23 @@ func main() {
 			return
 		}
 
+		body := strings.Split(params.Body, " ")
+
+		for i, word := range body {
+			for _, bardWord := range badWords {
+				if strings.ToLower(word) == bardWord {
+					body[i] = "****"
+				}
+			}
+		}
+
+		result := strings.Join(body, " ")
+
 		type validResponse struct {
-			Valid bool `json:"valid"`
+			CleanedBody string `json:"cleaned_body"`
 		}
 		validR := validResponse{
-			Valid: true,
+			CleanedBody: result,
 		}
 		data, _ := json.Marshal(validR)
 		w.Header().Set("Content-Type", "application/json")
