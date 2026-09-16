@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/thelol3882/chirpy/internal/database"
@@ -19,6 +20,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -36,9 +38,27 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprint(w, html)
 }
 
-func (cfg *apiConfig) habdlerReset(w http.ResponseWriter, _ *http.Request) {
-	cfg.fileserverHits.Store(0)
-	w.WriteHeader(http.StatusOK)
+// func (cfg *apiConfig) habdlerReset(w http.ResponseWriter, _ *http.Request) {
+// 	cfg.fileserverHits.Store(0)
+// 	w.WriteHeader(http.StatusOK)
+// }
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	type errResponse struct {
+		Error string `json:"error"`
+	}
+	respondWithJSON(w, code, errResponse{Error: msg})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(data)
 }
 
 func main() {
@@ -48,6 +68,7 @@ func main() {
 	}
 
 	dbURL := os.Getenv("DB_URL")
+	platformMode := os.Getenv("PLATFORM")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("cannot connect to database")
@@ -56,7 +77,8 @@ func main() {
 
 	dbQueries := database.New(db)
 	apiCfg := apiConfig{
-		db: dbQueries,
+		db:       dbQueries,
+		platform: platformMode,
 	}
 	mux := http.NewServeMux()
 
@@ -67,7 +89,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
-	mux.HandleFunc("POST /admin/reset", apiCfg.habdlerReset)
+	// mux.HandleFunc("POST /admin/reset", apiCfg.habdlerReset)
 	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Body string `json:"body"`
@@ -78,28 +100,12 @@ func main() {
 		decoder := json.NewDecoder(r.Body)
 		var params parameters
 		if err := decoder.Decode(&params); err != nil {
-			type errResponse struct {
-				Error string `json:"error"`
-			}
-			errR := errResponse{
-				Error: "Something went wrong",
-			}
-			data, _ := json.Marshal(errR)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write(data)
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 			return
 		}
 
 		if len(params.Body) > 140 {
-			type errResponse struct {
-				Error string `json:"error"`
-			}
-			errR := errResponse{
-				Error: "Body message is long",
-			}
-			data, _ := json.Marshal(errR)
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(data)
+			respondWithError(w, http.StatusBadRequest, "Body message is long")
 			return
 		}
 
@@ -118,13 +124,58 @@ func main() {
 		type validResponse struct {
 			CleanedBody string `json:"cleaned_body"`
 		}
-		validR := validResponse{
-			CleanedBody: result,
+		respondWithJSON(w, http.StatusOK, validResponse{CleanedBody: result})
+	})
+	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Email string `json:"email"`
 		}
-		data, _ := json.Marshal(validR)
-		w.Header().Set("Content-Type", "application/json")
+
+		decoder := json.NewDecoder(r.Body)
+		var params parameters
+		if err := decoder.Decode(&params); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
+
+		if params.Email == "" {
+			respondWithError(w, http.StatusBadRequest, "Use correct email")
+			return
+		}
+
+		user, err := apiCfg.db.CreateUser(r.Context(), params.Email)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong or email already used")
+			return
+		}
+
+		type User struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Email     string    `json:"email"`
+		}
+
+		respondWithJSON(w, http.StatusCreated, User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		})
+	})
+	mux.HandleFunc("POST /admin/reset", func(w http.ResponseWriter, r *http.Request) {
+		if apiCfg.platform != "dev" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		err := apiCfg.db.ResetUsers(r.Context())
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
 	})
 
 	s := &http.Server{
