@@ -89,6 +89,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+
 	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Body   string    `json:"body"`
@@ -137,7 +138,7 @@ func main() {
 			Body      string    `json:"body"`
 			UserID    uuid.UUID `json:"user_id"`
 		}
-		
+
 		respondWithJSON(w, http.StatusCreated, Chirp{
 			ID:        chirp.ID,
 			CreatedAt: chirp.CreatedAt,
@@ -146,6 +147,63 @@ func main() {
 			UserID:    chirp.UserID,
 		})
 	})
+	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		dbChirps, err := apiCfg.db.GetChirps(r.Context())
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+			return
+		}
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			UserID    uuid.UUID `json:"user_id"`
+		}
+		chirps := make([]Chirp, 0, len(dbChirps))
+
+		for _, dbChirp := range dbChirps {
+			chirps = append(chirps, Chirp{
+				ID:        dbChirp.ID,
+				CreatedAt: dbChirp.CreatedAt,
+				UpdatedAt: dbChirp.UpdatedAt,
+				Body:      dbChirp.Body,
+				UserID:    dbChirp.UserID,
+			})
+		}
+
+		respondWithJSON(w, http.StatusOK, chirps)
+	})
+	mux.HandleFunc("GET /api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
+		chirpID := r.PathValue("chirpID")
+
+		parsedUUID, err := uuid.Parse(chirpID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid chirp id")
+			return
+		}
+
+		chirp, err := apiCfg.db.GetChirp(r.Context(), parsedUUID)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "Chird with such id does not exist")
+			return
+		}
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			UserID    uuid.UUID `json:"user_id"`
+		}
+		respondWithJSON(w, http.StatusOK, Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		})
+	})
+
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Email string `json:"email"`
