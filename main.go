@@ -2,19 +2,20 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/thelol3882/chirpy/internal/database"
+)
+
+const (
+	port         = ":8080"
+	filepathRoot = "."
 )
 
 type apiConfig struct {
@@ -23,245 +24,62 @@ type apiConfig struct {
 	platform       string
 }
 
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
-	hits := cfg.fileserverHits.Load()
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	html := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", hits)
-	fmt.Fprint(w, html)
-}
-
-// func (cfg *apiConfig) habdlerReset(w http.ResponseWriter, _ *http.Request) {
-// 	cfg.fileserverHits.Store(0)
-// 	w.WriteHeader(http.StatusOK)
-// }
-
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-	type errResponse struct {
-		Error string `json:"error"`
-	}
-	respondWithJSON(w, code, errResponse{Error: msg})
-}
-
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(data)
-}
-
 func main() {
 	if err := godotenv.Load(); err != nil {
-		fmt.Println("cannot load env")
-		os.Exit(1)
+		log.Fatalf("couldn't load .env: %s", err)
 	}
 
 	dbURL := os.Getenv("DB_URL")
-	platformMode := os.Getenv("PLATFORM")
+	if dbURL == "" {
+		log.Fatal("DB_URL must be set")
+	}
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		fmt.Println("cannot connect to database")
-		os.Exit(1)
+		log.Fatalf("couldn't open database: %s", err)
+	}
+	if err := db.Ping(); err != nil {
+		log.Fatalf("couldn't connect to database: %s", err)
 	}
 
-	dbQueries := database.New(db)
-	apiCfg := apiConfig{
-		db:       dbQueries,
-		platform: platformMode,
+	apiCfg := &apiConfig{
+		db:       database.New(db),
+		platform: platform,
 	}
+
 	mux := http.NewServeMux()
 
-	mux.Handle("/app/", http.StripPrefix("/app", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
+	fileServer := http.FileServer(http.Dir(filepathRoot))
+	mux.Handle("/app/", http.StripPrefix("/app", apiCfg.middlewareMetricsInc(fileServer)))
+
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
+
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 
-	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-		type parameters struct {
-			Body   string    `json:"body"`
-			UserId uuid.UUID `json:"user_id"`
-		}
-
-		badWords := [3]string{"kerfuffle", "sharbert", "fornax"}
-
-		decoder := json.NewDecoder(r.Body)
-		var params parameters
-		if err := decoder.Decode(&params); err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-			return
-		}
-
-		if len(params.Body) > 140 {
-			respondWithError(w, http.StatusBadRequest, "Body message is long")
-			return
-		}
-
-		body := strings.Split(params.Body, " ")
-
-		for i, word := range body {
-			for _, bardWord := range badWords {
-				if strings.ToLower(word) == bardWord {
-					body[i] = "****"
-				}
-			}
-		}
-
-		result := strings.Join(body, " ")
-
-		chirp, err := apiCfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
-			Body:   result,
-			UserID: params.UserId,
-		})
-		if err != nil {
-			respondWithError(w, http.StatusBadRequest, "Something went wrong")
-			return
-		}
-
-		type Chirp struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Body      string    `json:"body"`
-			UserID    uuid.UUID `json:"user_id"`
-		}
-
-		respondWithJSON(w, http.StatusCreated, Chirp{
-			ID:        chirp.ID,
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body:      chirp.Body,
-			UserID:    chirp.UserID,
-		})
-	})
-	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-		dbChirps, err := apiCfg.db.GetChirps(r.Context())
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-			return
-		}
-		type Chirp struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Body      string    `json:"body"`
-			UserID    uuid.UUID `json:"user_id"`
-		}
-		chirps := make([]Chirp, 0, len(dbChirps))
-
-		for _, dbChirp := range dbChirps {
-			chirps = append(chirps, Chirp{
-				ID:        dbChirp.ID,
-				CreatedAt: dbChirp.CreatedAt,
-				UpdatedAt: dbChirp.UpdatedAt,
-				Body:      dbChirp.Body,
-				UserID:    dbChirp.UserID,
-			})
-		}
-
-		respondWithJSON(w, http.StatusOK, chirps)
-	})
-	mux.HandleFunc("GET /api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
-		chirpID := r.PathValue("chirpID")
-
-		parsedUUID, err := uuid.Parse(chirpID)
-		if err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid chirp id")
-			return
-		}
-
-		chirp, err := apiCfg.db.GetChirp(r.Context(), parsedUUID)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, "Chird with such id does not exist")
-			return
-		}
-		type Chirp struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Body      string    `json:"body"`
-			UserID    uuid.UUID `json:"user_id"`
-		}
-		respondWithJSON(w, http.StatusOK, Chirp{
-			ID:        chirp.ID,
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body:      chirp.Body,
-			UserID:    chirp.UserID,
-		})
-	})
-
-	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		type parameters struct {
-			Email string `json:"email"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		var params parameters
-		if err := decoder.Decode(&params); err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-			return
-		}
-
-		if params.Email == "" {
-			respondWithError(w, http.StatusBadRequest, "Use correct email")
-			return
-		}
-
-		user, err := apiCfg.db.CreateUser(r.Context(), params.Email)
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Something went wrong or email already used")
-			return
-		}
-
-		type User struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Email     string    `json:"email"`
-		}
-
-		respondWithJSON(w, http.StatusCreated, User{
-			ID:        user.ID,
-			CreatedAt: user.CreatedAt,
-			UpdatedAt: user.UpdatedAt,
-			Email:     user.Email,
-		})
-	})
-	mux.HandleFunc("POST /admin/reset", func(w http.ResponseWriter, r *http.Request) {
-		if apiCfg.platform != "dev" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-
-		err := apiCfg.db.ResetUsers(r.Context())
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	})
-
-	s := &http.Server{
-		Addr:         ":8080",
+	srv := &http.Server{
+		Addr:         port,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 
-	log.Fatal(s.ListenAndServe())
+	log.Printf("Serving files from %s on port %s", filepathRoot, port)
+	log.Fatal(srv.ListenAndServe())
+}
+
+func handlerReadiness(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
