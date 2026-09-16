@@ -89,10 +89,10 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
-	// mux.HandleFunc("POST /admin/reset", apiCfg.habdlerReset)
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
-			Body string `json:"body"`
+			Body   string    `json:"body"`
+			UserId uuid.UUID `json:"user_id"`
 		}
 
 		badWords := [3]string{"kerfuffle", "sharbert", "fornax"}
@@ -121,10 +121,30 @@ func main() {
 
 		result := strings.Join(body, " ")
 
-		type validResponse struct {
-			CleanedBody string `json:"cleaned_body"`
+		chirp, err := apiCfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+			Body:   result,
+			UserID: params.UserId,
+		})
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Something went wrong")
+			return
 		}
-		respondWithJSON(w, http.StatusOK, validResponse{CleanedBody: result})
+
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			UserID    uuid.UUID `json:"user_id"`
+		}
+		
+		respondWithJSON(w, http.StatusCreated, Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		})
 	})
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
