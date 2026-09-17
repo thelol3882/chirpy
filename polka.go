@@ -1,13 +1,26 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/thelol3882/chirpy/internal/auth"
 )
 
 func (cfg *apiConfig) handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	if result := subtle.ConstantTimeCompare([]byte(apiKey), []byte(cfg.polkaKey)); result == 0 {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
 	type parameters struct {
 		Event string `json:"event"`
 		Data  struct {

@@ -23,6 +23,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secretKey      string
+	polkaKey       string
 }
 
 func main() {
@@ -37,6 +38,10 @@ func main() {
 	platform := os.Getenv("PLATFORM")
 	if platform == "" {
 		log.Fatal("PLATFORM must be set")
+	}
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY must be set")
 	}
 	secretKey := os.Getenv("SECRET_KEY")
 	if secretKey == "" {
@@ -55,6 +60,7 @@ func main() {
 		db:        database.New(db),
 		platform:  platform,
 		secretKey: secretKey,
+		polkaKey:  polkaKey,
 	}
 
 	mux := http.NewServeMux()
