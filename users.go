@@ -10,12 +10,15 @@ import (
 	"github.com/thelol3882/chirpy/internal/database"
 )
 
+const accessTokenTTL = time.Hour
+
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token,omitempty"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
 }
 
 func userFromDB(dbUser database.User) User {
@@ -69,9 +72,8 @@ func (cfg *apiConfig) handlerUsersCreate(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	var params parameters
@@ -90,10 +92,6 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 || params.ExpiresInSeconds < 0 {
-		params.ExpiresInSeconds = 3600
-	}
-
 	dbUser, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
@@ -107,12 +105,25 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responseUser := userFromDB(dbUser)
-	token, err := auth.MakeJWT(responseUser.ID, cfg.secretKey, time.Duration(params.ExpiresInSeconds)*time.Second)
+	token, err := auth.MakeJWT(responseUser.ID, cfg.secretKey, accessTokenTTL)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 
 	responseUser.Token = token
+
+	refreshToken := auth.MakeRefreshToken()
+	_, err = cfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token: refreshToken,
+		UserID: responseUser.ID,
+		ExpiresAt: time.Now().UTC().Add(60 * 24 * time.Hour),
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
+	responseUser.RefreshToken = refreshToken
 	respondWithJSON(w, http.StatusOK, responseUser)
 }
