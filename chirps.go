@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,6 +99,11 @@ func (cfg *apiConfig) handlerChirpsRetrieve(w http.ResponseWriter, r *http.Reque
 	chirps := make([]Chirp, 0, len(dbChirps))
 	for _, dbChirp := range dbChirps {
 		chirps = append(chirps, chirpFromDB(dbChirp))
+	}
+
+	sortParam := r.URL.Query().Get("sort")
+	if sortParam == "desc" {
+		slices.Reverse(chirps)
 	}
 
 	respondWithJSON(w, http.StatusOK, chirps)
