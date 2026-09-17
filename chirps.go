@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thelol3882/chirpy/internal/auth"
 	"github.com/thelol3882/chirpy/internal/database"
 )
 
@@ -35,8 +36,19 @@ func chirpFromDB(dbChirp database.Chirp) Chirp {
 
 func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "No token provided")
+		return
+	}
+
+	userId, err := auth.ValidateJWT(token, cfg.secretKey)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
 	}
 
 	var params parameters
@@ -53,7 +65,7 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 
 	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   cleaned,
-		UserID: params.UserID,
+		UserID: userId,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
